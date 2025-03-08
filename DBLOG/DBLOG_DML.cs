@@ -120,13 +120,15 @@ namespace DBLOG
                 {
                     tlog = wslog.OrderBy(p => p.Current_LSN).FirstOrDefault();
                     tsql = $"with b as "
-                            + $"(select top 1 * from sys.fn_dblog(null,null) b1 "
+                            + $"(select top 1 b1.* "
+                            + $" from sys.fn_dblog(null,null) b1 "
                             + $" where b1.[Current LSN]<'{tlog.Current_LSN}' "
                             + $" and b1.[Page ID]='{tlog.Page_ID}' "
                             + $" and b1.[Slot ID]={tlog.Slot_ID} "
                             + $" and exists(select 1 from sys.fn_dblog(null,null) b2 where b2.[Transaction ID]=b1.[Transaction ID] and b2.Context in('LCX_CLUSTERED','LCX_HEAP','LCX_MARK_AS_GHOST')) "
-                            + $" order by [Current LSN] desc)"
-                            + $"select top 1 t.* from sys.fn_dblog(null,null) t "
+                            + $" order by b1.[Current LSN] desc)"
+                            + $"select top 1 t.* "
+                            + $"from sys.fn_dblog(null,null) t "
                             + $"join b on t.[Transaction ID]=b.[Transaction ID] and t.[Current LSN]>b.[Current LSN] "
                             + $"where t.Context in('LCX_CLUSTERED','LCX_HEAP','LCX_MARK_AS_GHOST') "
                             + $"order by t.[Current LSN] ";
@@ -1878,6 +1880,7 @@ namespace DBLOG
                 for (i = 0, j = 0; i <= intail.Count - 1; i = i + 1)
                 {
                     temp = colconts2.Substring((2 + i * 2) * 2, 2 * 2);
+                    if (temp.StartsWith("8") == true) { temp = "0" + temp.Substring(1); }
                     length = physicallength = Convert.ToInt32(temp, 16) - j;
 
                     cols[intail[i]] = (offset, length, physicallength);
@@ -1914,11 +1917,11 @@ namespace DBLOG
                                 columns[i].Value = TranslateData_Time(valuehex.ToByteArray(), 0, columns[i].Length, columns[i].Scale);
                                 break;
                             case "varchar":
-                                vc = new FVarColumnInfo() { InRow = true, FLogContents = valuehex };
+                                vc = new FVarColumnInfo() { InRow = !valuehex.StartsWith("0"), FLogContents = valuehex };
                                 (columns[i].ValueHex, columns[i].Value) = TranslateData_VarChar(valuehex.ToByteArray(), vc, false);
                                 break;
                             case "nvarchar":
-                                vc = new FVarColumnInfo() { InRow = true, FLogContents = valuehex };
+                                vc = new FVarColumnInfo() { InRow = !valuehex.StartsWith("0"), FLogContents = valuehex };
                                 (columns[i].ValueHex, columns[i].Value) = TranslateData_VarChar(valuehex.ToByteArray(), vc, true);
                                 break;
                             case "xml":
@@ -2288,7 +2291,7 @@ namespace DBLOG
 
             // DataCompressionType
             tsql = "select PartitionId=p.partition_id, "
-                    + "     CompressionType=case p.data_compression when 0 then N'NONE' when 1 then N'ROW' when 2 then N'PAGE' when 3 then N'COLUMNSTORE' when 4 then N'COLUMNSTORE_ARCHIVE' else N'' end "
+                    + "    CompressionType=case p.data_compression when 0 then N'NONE' when 1 then N'ROW' when 2 then N'PAGE' when 3 then N'COLUMNSTORE' when 4 then N'COLUMNSTORE_ARCHIVE' else N'' end "
                     + "  from sys.tables t "
                     + "  join sys.schemas s on t.schema_id=s.schema_id "
                     + "  join sys.partitions p on t.object_id=p.object_id "
@@ -3224,16 +3227,25 @@ namespace DBLOG
                         cutlen = Convert.ToInt32(tp.Offset - (i == 0 ? 0 : pagelist[i - 1].Offset));
                         temppage = GetPageInfo(tp.FileNumPageNum_Hex);
 
-                        pagedata = temppage.PageData;
-                        pagedata = pagedata.Stuff(0, (96 + 14) * 2, "");
-                        pagedata = pagedata.Stuff(pagedata.Length - 42 * 2, 42 * 2, "");
-                        if (pagedata.Length / 2 >= cutlen)
+                        if (tp.SlotNum == 0)
                         {
-                            pagedata = (cutlen > 0 ? pagedata.Substring(0, cutlen * 2) : pagedata);
+                            pagedata = temppage.PageData;
+                            pagedata = pagedata.Stuff(0, (96 + 14) * 2, "");
+                            pagedata = pagedata.Stuff(pagedata.Length - 42 * 2, 42 * 2, "");
+                            if (pagedata.Length / 2 >= cutlen)
+                            {
+                                pagedata = (cutlen > 0 ? pagedata.Substring(0, cutlen * 2) : pagedata);
+                            }
+                            else
+                            {
+                                pagedata = pagedata + new StringBuilder((cutlen - pagedata.Length / 2) * 2).Insert(0, "78", (cutlen - pagedata.Length / 2)).ToString();
+                            }
                         }
                         else
                         {
-                            pagedata = pagedata + new StringBuilder((cutlen - pagedata.Length / 2) * 2).Insert(0, "78", (cutlen - pagedata.Length / 2)).ToString();
+                            pagedata = temppage.SlotData[tp.SlotNum];
+                            pagedata = pagedata.Stuff(0, 14 * 2, "");
+                            pagedata = pagedata.Substring(0, cutlen * 2);
                         }
 
                         fvaluehex = fvaluehex + pagedata;
